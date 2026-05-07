@@ -50,6 +50,7 @@ internal class JinaLiveScreenSampler(
   private var virtualDisplay: VirtualDisplay? = null
   private var captureThread: HandlerThread? = null
   private var captureHandler: Handler? = null
+  private var projectionCallback: MediaProjection.Callback? = null
   private val lastEmitMs = AtomicLong(0L)
 
   fun start() {
@@ -60,6 +61,23 @@ internal class JinaLiveScreenSampler(
 
     captureThread = HandlerThread("JinaLiveScreenSampler").apply { start() }
     captureHandler = Handler(captureThread!!.looper)
+
+    // Android 14+ (API 34) requires a MediaProjection.Callback to be
+    // registered before createVirtualDisplay is called. Without this the
+    // platform throws SecurityException and the foreground service crashes.
+    val cb =
+      object : MediaProjection.Callback() {
+        override fun onStop() {
+          // Caller (the session service) owns projection lifecycle, but if
+          // the system tears it down (user taps "Stop sharing" in the
+          // notification) we need to release our virtual display so the
+          // ImageReader doesn't keep firing into a dead surface.
+          runCatching { virtualDisplay?.release() }
+          virtualDisplay = null
+        }
+      }
+    projectionCallback = cb
+    runCatching { mediaProjection.registerCallback(cb, captureHandler) }
 
     val reader =
       ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2).also {
@@ -106,6 +124,11 @@ internal class JinaLiveScreenSampler(
   }
 
   fun stop() {
+    val cb = projectionCallback
+    projectionCallback = null
+    if (cb != null) {
+      runCatching { mediaProjection.unregisterCallback(cb) }
+    }
     runCatching { virtualDisplay?.release() }
     virtualDisplay = null
     runCatching { imageReader?.close() }

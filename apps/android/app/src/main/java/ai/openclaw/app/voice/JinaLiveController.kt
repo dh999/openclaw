@@ -89,6 +89,16 @@ class JinaLiveController private constructor(private val appContext: Context) {
 
     val live = service
     if (bound && live != null) {
+      // Avoid creating a second jina-live session when the controller is
+      // re-entered while one is already running (e.g. the user just toggled
+      // screen sharing on top of an active voice session). The
+      // foregroundService restart above already routed any new
+      // MediaProjection extras into onStartCommand → adoptMediaProjectionFrom,
+      // so we just need to let the existing session continue.
+      if (live.currentSessionId() != null) {
+        Log.i(TAG, "start(): existing session ${live.currentSessionId()} active — skipping new startSession")
+        return
+      }
       live.startSession(session, instructions)
       return
     }

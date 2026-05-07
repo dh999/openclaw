@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -59,6 +62,9 @@ internal class JinaLiveMicCapture(
   private val running = AtomicBoolean(false)
   private var recorder: AudioRecord? = null
   private var thread: Thread? = null
+  private var aec: AcousticEchoCanceler? = null
+  private var ns: NoiseSuppressor? = null
+  private var agc: AutomaticGainControl? = null
 
   @SuppressLint("MissingPermission")
   fun start() {
@@ -77,10 +83,17 @@ internal class JinaLiveMicCapture(
     }
     val bufferBytes = (minBuffer * 4).coerceAtLeast(frameSize * 2 * 4)
 
+    // VOICE_COMMUNICATION engages the system's built-in echo cancellation +
+    // gain control on most modern Android devices, which is what we want
+    // when the same phone is producing assistant audio through the speaker
+    // and capturing the user's voice through the mic. VOICE_RECOGNITION
+    // assumes a near-field mic with no echo path and lets system effects
+    // pass through, so the assistant's own voice loops back into Gemini and
+    // the model never stops responding to itself.
     val rec =
       try {
         AudioRecord(
-          MediaRecorder.AudioSource.VOICE_RECOGNITION,
+          MediaRecorder.AudioSource.VOICE_COMMUNICATION,
           sampleRateHz,
           AudioFormat.CHANNEL_IN_MONO,
           AudioFormat.ENCODING_PCM_16BIT,
@@ -97,6 +110,25 @@ internal class JinaLiveMicCapture(
       running.set(false)
       return
     }
+    val sessionId = rec.audioSessionId
+    if (AcousticEchoCanceler.isAvailable()) {
+      runCatching {
+        aec = AcousticEchoCanceler.create(sessionId)?.apply { enabled = true }
+        Log.i(TAG, "AcousticEchoCanceler attached (enabled=${aec?.enabled})")
+      }
+    } else {
+      Log.w(TAG, "AcousticEchoCanceler unavailable on this device — relying on system VOICE_COMMUNICATION AEC only")
+    }
+    if (NoiseSuppressor.isAvailable()) {
+      runCatching {
+        ns = NoiseSuppressor.create(sessionId)?.apply { enabled = true }
+      }
+    }
+    if (AutomaticGainControl.isAvailable()) {
+      runCatching {
+        agc = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
+      }
+    }
     recorder = rec
     runCatching { rec.startRecording() }
 
@@ -106,6 +138,12 @@ internal class JinaLiveMicCapture(
 
   fun stop() {
     if (!running.getAndSet(false)) return
+    runCatching { aec?.release() }
+    runCatching { ns?.release() }
+    runCatching { agc?.release() }
+    aec = null
+    ns = null
+    agc = null
     runCatching { recorder?.stop() }
     runCatching { recorder?.release() }
     recorder = null

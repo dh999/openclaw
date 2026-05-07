@@ -19,7 +19,13 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 internal object JinaLiveBroadcastDispatcher {
   private const val TAG = "JinaLiveBroadcast"
-  private const val PREFIX = "jina.live."
+  // Gateway routes broadcasts under the `plugin.*` namespace per
+  // server-broadcast.ts; using `plugin.jina.live.*` keeps our events on the
+  // documented plugin-broadcast scope path (operator.write/admin) instead of
+  // hitting the unscoped default-deny.
+  private const val PREFIX = "plugin.jina.live."
+
+  @Volatile private var firstEventLogged = false
 
   private val listeners = CopyOnWriteArrayList<(event: String, payloadJson: String?) -> Unit>()
 
@@ -37,6 +43,10 @@ internal object JinaLiveBroadcastDispatcher {
    */
   fun handleGatewayEvent(event: String, payloadJson: String?) {
     if (!event.startsWith(PREFIX)) return
+    if (!firstEventLogged) {
+      firstEventLogged = true
+      Log.i(TAG, "first jina.live.* event received: $event (listeners=${listeners.size})")
+    }
     if (listeners.isEmpty()) return
     for (listener in listeners) {
       try {

@@ -86,24 +86,49 @@ class JinaLiveSessionService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val notification = buildNotification("Live mode standby")
-    val foregroundType =
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-      } else {
-        0
-      }
+    val hasProjectionExtras =
+      intent != null &&
+        intent.hasExtra(EXTRA_PROJECTION_RESULT_CODE) &&
+        intent.hasExtra(EXTRA_PROJECTION_INTENT)
+
+    // Android 14+ FGS rules are chicken-and-egg for MediaProjection: the
+    // service can only flip the MEDIA_PROJECTION foreground type bit once
+    // it actually holds an `android:project_media` AppOp permission, which
+    // itself is only granted by holding a live MediaProjection token. So
+    // we always start microphone-only first; if the start intent carried
+    // consent extras we then call MediaProjectionManager.getMediaProjection
+    // and re-foreground the service with the additional MEDIA_PROJECTION
+    // type bit before any createVirtualDisplay call.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-      startForeground(NOTIFICATION_ID, notification, foregroundType)
+      startForeground(
+        NOTIFICATION_ID,
+        notification,
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+      )
     } else {
       startForeground(NOTIFICATION_ID, notification)
     }
 
-    // Optional MediaProjection handoff from Activity.
-    if (intent != null) {
-      adoptMediaProjectionFrom(intent)
+    if (hasProjectionExtras) {
+      adoptMediaProjectionFrom(requireNotNull(intent))
     }
     return START_STICKY
+  }
+
+  /** Re-foreground the service with the MEDIA_PROJECTION type added. */
+  private fun upgradeForegroundForMediaProjection() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+    val notification = buildNotification("Live mode active (screen)")
+    runCatching {
+      startForeground(
+        NOTIFICATION_ID,
+        notification,
+        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+      )
+    }.onFailure {
+      Log.w(TAG, "FGS type upgrade to MEDIA_PROJECTION failed: ${it.message}")
+    }
   }
 
   override fun onDestroy() {
@@ -188,6 +213,12 @@ class JinaLiveSessionService : Service() {
     screenSampler = null
     runCatching { this.mediaProjection?.stop() }
     this.mediaProjection = projection
+    if (projection != null) {
+      // Now that we hold a live MediaProjection token, the FGS may legally
+      // declare MEDIA_PROJECTION type. createVirtualDisplay below will
+      // refuse to run otherwise on Android 14+.
+      upgradeForegroundForMediaProjection()
+    }
     if (sessionId != null) {
       startScreenSamplerIfReady()
     }
@@ -198,19 +229,35 @@ class JinaLiveSessionService : Service() {
    * transcript listeners. Wire this from NodeRuntime / GatewaySession
    * (next commit).
    */
+  private var firstAudioBroadcastLogged = false
+  private var firstTranscriptLogged = false
+
   fun handleBroadcastEvent(event: String, payloadJson: String?) {
     when (event) {
-      "jina.live.audio" -> {
+      "plugin.jina.live.audio" -> {
         if (payloadJson == null) return
         val sid = extractStringField(payloadJson, "sessionId")
         if (sid != null && sid != sessionId) return
         val audioB64 = extractStringField(payloadJson, "audio") ?: return
+        if (!firstAudioBroadcastLogged) {
+          firstAudioBroadcastLogged = true
+          Log.i(TAG, "first plugin.jina.live.audio frame received (b64Len=${audioB64.length})")
+        }
         audioPlayer?.enqueueBase64MuLaw(audioB64)
       }
-      "jina.live.audio.clear" -> {
+      "plugin.jina.live.transcript" -> {
+        if (payloadJson == null) return
+        if (!firstTranscriptLogged) {
+          firstTranscriptLogged = true
+          val role = extractStringField(payloadJson, "role")
+          val text = extractStringField(payloadJson, "text")
+          Log.i(TAG, "first plugin.jina.live.transcript: role=$role text=${text?.take(80)}")
+        }
+      }
+      "plugin.jina.live.audio.clear" -> {
         audioPlayer?.clear()
       }
-      "jina.live.session.closed", "jina.live.session.error" -> {
+      "plugin.jina.live.session.closed", "plugin.jina.live.session.error" -> {
         Log.i(TAG, "session ended via broadcast: $event")
         stopSession()
         stopSelfSafely()
@@ -224,33 +271,72 @@ class JinaLiveSessionService : Service() {
     val client = bridge ?: return
     val sid = sessionId ?: return
     if (micCapture != null) return
+    var firstFrameLogged = false
+    var firstFailureLogged = false
+    var sentFrameCount = 0L
     val capture =
       JinaLiveMicCapture { chunk ->
         scope.launch {
-          runCatching { client.sendAudio(sid, chunk) }
+          val r = runCatching { client.sendAudio(sid, chunk) }.getOrNull()
+          if (r is JinaLiveBridgeClient.CallResult.Success<*>) {
+            if (!firstFrameLogged) {
+              firstFrameLogged = true
+              Log.i(TAG, "first mic frame ack from gateway (size=${chunk.size})")
+            }
+            sentFrameCount += 1
+            if (sentFrameCount % 250L == 0L) {
+              Log.i(TAG, "mic frames sent: $sentFrameCount")
+            }
+          } else if (r is JinaLiveBridgeClient.CallResult.Failure && !firstFailureLogged) {
+            firstFailureLogged = true
+            Log.w(TAG, "mic frame send failed: ${r.message}")
+          }
         }
       }
     micCapture = capture
     capture.start()
+    Log.i(TAG, "mic capture started for session $sid")
   }
 
   private fun startScreenSamplerIfReady() {
-    val projection = mediaProjection ?: return
-    val client = bridge ?: return
-    val sid = sessionId ?: return
+    val projection = mediaProjection
+    val client = bridge
+    val sid = sessionId
+    Log.i(
+      TAG,
+      "startScreenSamplerIfReady: projection=${projection != null} bridge=${client != null} sid=${sid != null} alreadyRunning=${screenSampler != null}",
+    )
+    if (projection == null || client == null || sid == null) return
     if (screenSampler != null) return
+    var firstFrameLogged = false
+    var firstFailureLogged = false
+    var sentFrameCount = 0L
     val sampler =
       JinaLiveScreenSampler(
         context = applicationContext,
         mediaProjection = projection,
         onFrame = { jpeg ->
           scope.launch {
-            runCatching { client.sendFrame(sid, jpeg, "image/jpeg") }
+            val r = runCatching { client.sendFrame(sid, jpeg, "image/jpeg") }.getOrNull()
+            if (r is JinaLiveBridgeClient.CallResult.Success<*>) {
+              if (!firstFrameLogged) {
+                firstFrameLogged = true
+                Log.i(TAG, "first screen frame ack from gateway (jpegBytes=${jpeg.size})")
+              }
+              sentFrameCount += 1
+              if (sentFrameCount % 10L == 0L) {
+                Log.i(TAG, "screen frames sent: $sentFrameCount (jpegBytes=${jpeg.size})")
+              }
+            } else if (r is JinaLiveBridgeClient.CallResult.Failure && !firstFailureLogged) {
+              firstFailureLogged = true
+              Log.w(TAG, "screen frame send failed: ${r.message}")
+            }
           }
         },
       )
     screenSampler = sampler
     sampler.start()
+    Log.i(TAG, "screen sampler started for session $sid")
   }
 
   private fun adoptMediaProjectionFrom(intent: Intent) {
@@ -262,9 +348,35 @@ class JinaLiveSessionService : Service() {
         @Suppress("DEPRECATION")
         intent.getParcelableExtra(EXTRA_PROJECTION_INTENT)
       }
-    if (resultCode == 0 || data == null) return
-    val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager ?: return
-    val projection = runCatching { mgr.getMediaProjection(resultCode, data) }.getOrNull()
+    Log.i(TAG, "adoptMediaProjectionFrom: resultCode=$resultCode dataNull=${data == null}")
+    if (resultCode == 0 || data == null) {
+      Log.w(TAG, "adoptMediaProjectionFrom: missing resultCode/data — bailing")
+      return
+    }
+    val mgr =
+      getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+    if (mgr == null) {
+      Log.w(TAG, "adoptMediaProjectionFrom: MediaProjectionManager service unavailable")
+      return
+    }
+    // Android 14+ requires the FGS to already be running with
+    // FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION before getMediaProjection
+    // succeeds. We can't pre-set that type until we *have* the token, so
+    // we attempt the type upgrade first and fall back to legacy behavior
+    // on older platforms.
+    upgradeForegroundForMediaProjection()
+    val projection =
+      try {
+        mgr.getMediaProjection(resultCode, data)
+      } catch (err: Throwable) {
+        Log.w(TAG, "getMediaProjection threw: ${err.javaClass.simpleName}: ${err.message}")
+        null
+      }
+    if (projection == null) {
+      Log.w(TAG, "getMediaProjection returned null — screen sharing disabled for this session")
+    } else {
+      Log.i(TAG, "MediaProjection acquired")
+    }
     setMediaProjection(projection)
   }
 
