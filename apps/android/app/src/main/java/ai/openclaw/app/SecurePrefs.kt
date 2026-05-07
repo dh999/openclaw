@@ -168,6 +168,19 @@ class SecurePrefs(
   private val _speakerEnabled = MutableStateFlow(plainPrefs.getBoolean("voice.speakerEnabled", true))
   val speakerEnabled: StateFlow<Boolean> = _speakerEnabled
 
+  /**
+   * Live Mode (Jina Live / Gemini Live) — when on, the next wake / explicit
+   * trigger opens a streaming session against the jina-live plugin instead
+   * of the existing TalkMode flow.
+   */
+  private val _jinaLiveEnabled = MutableStateFlow(plainPrefs.getBoolean("jinaLive.enabled", false))
+  val jinaLiveEnabled: StateFlow<Boolean> = _jinaLiveEnabled
+
+  /** Whether the live session should also push screen frames once granted. */
+  private val _jinaLiveScreenShareEnabled =
+    MutableStateFlow(plainPrefs.getBoolean("jinaLive.screenShare.enabled", false))
+  val jinaLiveScreenShareEnabled: StateFlow<Boolean> = _jinaLiveScreenShareEnabled
+
   fun setLastDiscoveredStableId(value: String) {
     val trimmed = value.trim()
     plainPrefs.edit { putString("gateway.lastDiscoveredStableID", trimmed) }
@@ -486,6 +499,16 @@ class SecurePrefs(
   fun setSpeakerEnabled(value: Boolean) {
     plainPrefs.edit { putBoolean("voice.speakerEnabled", value) }
     _speakerEnabled.value = value
+  }
+
+  fun setJinaLiveEnabled(value: Boolean) {
+    plainPrefs.edit { putBoolean("jinaLive.enabled", value) }
+    _jinaLiveEnabled.value = value
+  }
+
+  fun setJinaLiveScreenShareEnabled(value: Boolean) {
+    plainPrefs.edit { putBoolean("jinaLive.screenShare.enabled", value) }
+    _jinaLiveScreenShareEnabled.value = value
   }
 
   private fun loadNotificationForwardingPackages(): Set<String> {
