@@ -230,7 +230,13 @@ class JinaLiveSessionService : Service() {
 
   private fun adoptMediaProjectionFrom(intent: Intent) {
     val resultCode = intent.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0)
-    val data = intent.getParcelableExtra<Intent>(EXTRA_PROJECTION_INTENT)
+    val data: Intent? =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        intent.getParcelableExtra(EXTRA_PROJECTION_INTENT, Intent::class.java)
+      } else {
+        @Suppress("DEPRECATION")
+        intent.getParcelableExtra(EXTRA_PROJECTION_INTENT)
+      }
     if (resultCode == 0 || data == null) return
     val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager ?: return
     val projection = runCatching { mgr.getMediaProjection(resultCode, data) }.getOrNull()
