@@ -1094,6 +1094,7 @@ class NodeRuntime(
     micCapture.handleGatewayEvent(event, payloadJson)
     talkMode.handleGatewayEvent(event, payloadJson)
     chat.handleGatewayEvent(event, payloadJson)
+    ai.openclaw.app.voice.JinaLiveBroadcastDispatcher.handleGatewayEvent(event, payloadJson)
   }
 
   private fun parseChatSendRunId(response: String): String? {

@@ -74,9 +74,14 @@ class JinaLiveSessionService : Service() {
 
   override fun onBind(intent: Intent?): IBinder = binder
 
+  private val broadcastListener: (String, String?) -> Unit = { event, payloadJson ->
+    handleBroadcastEvent(event, payloadJson)
+  }
+
   override fun onCreate() {
     super.onCreate()
     ensureNotificationChannel()
+    JinaLiveBroadcastDispatcher.register(broadcastListener)
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -103,6 +108,7 @@ class JinaLiveSessionService : Service() {
 
   override fun onDestroy() {
     super.onDestroy()
+    JinaLiveBroadcastDispatcher.unregister(broadcastListener)
     stopSession()
     scope.cancel()
   }
