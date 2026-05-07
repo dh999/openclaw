@@ -67,6 +67,7 @@ class JinaLiveSessionService : Service() {
   private var bridge: JinaLiveBridgeClient? = null
   private var audioPlayer: JinaLiveAudioPlayer? = null
   private var screenSampler: JinaLiveScreenSampler? = null
+  private var micCapture: JinaLiveMicCapture? = null
   private var mediaProjection: MediaProjection? = null
   private var sessionId: String? = null
   private var sessionJob: Job? = null
@@ -130,6 +131,7 @@ class JinaLiveSessionService : Service() {
             sessionId = result.value.sessionId
             updateNotification("Live mode active (${result.value.sessionId.take(8)}…)")
             Log.i(TAG, "session started ${result.value.sessionId}")
+            startMicCaptureIfReady()
             startScreenSamplerIfReady()
           }
           is JinaLiveBridgeClient.CallResult.Failure -> {
@@ -147,6 +149,9 @@ class JinaLiveSessionService : Service() {
     sessionId = null
     sessionJob?.cancel()
     sessionJob = null
+
+    runCatching { micCapture?.stop() }
+    micCapture = null
 
     runCatching { screenSampler?.stop() }
     screenSampler = null
@@ -208,6 +213,20 @@ class JinaLiveSessionService : Service() {
   }
 
   // ---------- Internals ----------
+
+  private fun startMicCaptureIfReady() {
+    val client = bridge ?: return
+    val sid = sessionId ?: return
+    if (micCapture != null) return
+    val capture =
+      JinaLiveMicCapture { chunk ->
+        scope.launch {
+          runCatching { client.sendAudio(sid, chunk) }
+        }
+      }
+    micCapture = capture
+    capture.start()
+  }
 
   private fun startScreenSamplerIfReady() {
     val projection = mediaProjection ?: return
