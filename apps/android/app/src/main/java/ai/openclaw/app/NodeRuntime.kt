@@ -647,6 +647,14 @@ class NodeRuntime(
     }
   }
 
+  /**
+   * Returns the active gateway-side operator session if the gateway is
+   * connected, or null otherwise. Consumers (e.g. JinaLiveSessionService)
+   * use this to issue gateway RPCs without holding their own connection.
+   */
+  fun currentOperatorSession(): GatewaySession? =
+    if (operatorConnected) operatorSession else null
+
   private fun seedLastDiscoveredGateway(list: List<GatewayEndpoint>) {
     if (list.isEmpty()) return
     if (lastDiscoveredStableId.value.trim().isNotEmpty()) return

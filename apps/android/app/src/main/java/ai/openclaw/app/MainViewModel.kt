@@ -12,7 +12,9 @@ import ai.openclaw.app.gateway.GatewayEndpoint
 import ai.openclaw.app.node.CameraCaptureManager
 import ai.openclaw.app.node.CanvasController
 import ai.openclaw.app.node.SmsManager
+import ai.openclaw.app.voice.JinaLiveController
 import ai.openclaw.app.voice.VoiceConversationEntry
+import android.content.Intent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -102,6 +104,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
   val canvasDebugStatusEnabled: StateFlow<Boolean> = prefs.canvasDebugStatusEnabled
   val speakerEnabled: StateFlow<Boolean> = prefs.speakerEnabled
   val micEnabled: StateFlow<Boolean> = prefs.talkEnabled
+  val jinaLiveEnabled: StateFlow<Boolean> = prefs.jinaLiveEnabled
+  val jinaLiveScreenShareEnabled: StateFlow<Boolean> = prefs.jinaLiveScreenShareEnabled
 
   val micCooldown: StateFlow<Boolean> = runtimeState(initial = false) { it.micCooldown }
   val micStatusText: StateFlow<String> = runtimeState(initial = "Mic off") { it.micStatusText }
@@ -281,6 +285,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
   fun setMicEnabled(enabled: Boolean) {
     ensureRuntime().setMicEnabled(enabled)
+  }
+
+  fun setJinaLiveEnabled(enabled: Boolean) {
+    prefs.setJinaLiveEnabled(enabled)
+    if (!enabled) {
+      JinaLiveController.get(getApplication()).stop()
+    }
+  }
+
+  fun setJinaLiveScreenShareEnabled(enabled: Boolean) {
+    prefs.setJinaLiveScreenShareEnabled(enabled)
+  }
+
+  /**
+   * Start a Jina Live session. The caller is responsible for collecting
+   * the MediaProjection consent result before invoking this when screen
+   * sharing is enabled. Returns false if no operator gateway session is
+   * connected.
+   */
+  fun startJinaLive(
+    instructions: String? = null,
+    projectionResultCode: Int? = null,
+    projectionData: Intent? = null,
+  ): Boolean {
+    val session = ensureRuntime().currentOperatorSession() ?: return false
+    JinaLiveController.get(getApplication()).start(
+      session = session,
+      instructions = instructions,
+      projectionResultCode = projectionResultCode,
+      projectionData = projectionData,
+    )
+    return true
+  }
+
+  fun stopJinaLive() {
+    JinaLiveController.get(getApplication()).stop()
   }
 
   fun setSpeakerEnabled(enabled: Boolean) {

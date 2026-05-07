@@ -80,6 +80,8 @@ fun SettingsSheet(viewModel: MainViewModel) {
   val instanceId by viewModel.instanceId.collectAsState()
   val displayName by viewModel.displayName.collectAsState()
   val cameraEnabled by viewModel.cameraEnabled.collectAsState()
+  val jinaLiveEnabled by viewModel.jinaLiveEnabled.collectAsState()
+  val jinaLiveScreenShareEnabled by viewModel.jinaLiveScreenShareEnabled.collectAsState()
   val locationMode by viewModel.locationMode.collectAsState()
   val locationPreciseEnabled by viewModel.locationPreciseEnabled.collectAsState()
   val preventSleep by viewModel.preventSleep.collectAsState()
@@ -335,6 +337,22 @@ fun SettingsSheet(viewModel: MainViewModel) {
       assistantRoleHeld = isAssistantRoleHeld(context)
     }
 
+  val jinaLiveProjectionLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+      val data = result.data
+      val ok = result.resultCode == android.app.Activity.RESULT_OK && data != null
+      val started =
+        viewModel.startJinaLive(
+          projectionResultCode = if (ok) result.resultCode else null,
+          projectionData = if (ok) data else null,
+        )
+      if (!started) {
+        // Could not start (gateway not connected). Roll the toggle back so the
+        // user retries after pairing instead of staring at a half-on switch.
+        viewModel.setJinaLiveEnabled(false)
+      }
+    }
+
   DisposableEffect(lifecycleOwner, context) {
     val observer =
       LifecycleEventObserver { _, event ->
@@ -574,6 +592,73 @@ fun SettingsSheet(viewModel: MainViewModel) {
             headlineContent = { Text("Camera", style = mobileHeadline) },
             supportingContent = { Text("Photos and video clips (foreground only).", style = mobileCallout) },
             trailingContent = { Switch(checked = cameraEnabled, onCheckedChange = ::setCameraEnabledChecked) },
+          )
+          HorizontalDivider(color = mobileBorder)
+          ListItem(
+            modifier = Modifier.fillMaxWidth(),
+            colors = listItemColors,
+            headlineContent = { Text("지나 Live (real-time voice)", style = mobileHeadline) },
+            supportingContent = {
+              Text(
+                "Hands-free streaming voice loop with the gateway-side jina-live provider.",
+                style = mobileCallout,
+              )
+            },
+            trailingContent = {
+              Switch(
+                checked = jinaLiveEnabled,
+                onCheckedChange = { checked ->
+                  viewModel.setJinaLiveEnabled(checked)
+                  if (checked) {
+                    if (jinaLiveScreenShareEnabled) {
+                      val mgr =
+                        context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                          as? android.media.projection.MediaProjectionManager
+                      val intent = mgr?.createScreenCaptureIntent()
+                      if (intent != null) {
+                        jinaLiveProjectionLauncher.launch(intent)
+                      } else {
+                        viewModel.startJinaLive()
+                      }
+                    } else {
+                      val started = viewModel.startJinaLive()
+                      if (!started) viewModel.setJinaLiveEnabled(false)
+                    }
+                  } else {
+                    viewModel.stopJinaLive()
+                  }
+                },
+              )
+            },
+          )
+          HorizontalDivider(color = mobileBorder)
+          ListItem(
+            modifier = Modifier.fillMaxWidth().alpha(if (jinaLiveEnabled) 1f else 0.6f),
+            colors = listItemColors,
+            headlineContent = { Text("Live screen sharing", style = mobileHeadline) },
+            supportingContent = {
+              Text(
+                "Sample your screen at ~1 fps while Live is on so 지나 can answer about what you are looking at.",
+                style = mobileCallout,
+              )
+            },
+            trailingContent = {
+              Switch(
+                checked = jinaLiveScreenShareEnabled,
+                onCheckedChange = { checked ->
+                  viewModel.setJinaLiveScreenShareEnabled(checked)
+                  // If Live is already running and the user toggles screen share,
+                  // request the consent intent so the next session picks it up.
+                  if (checked && jinaLiveEnabled) {
+                    val mgr =
+                      context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
+                        as? android.media.projection.MediaProjectionManager
+                    val intent = mgr?.createScreenCaptureIntent()
+                    if (intent != null) jinaLiveProjectionLauncher.launch(intent)
+                  }
+                },
+              )
+            },
           )
         }
       }
